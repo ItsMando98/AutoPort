@@ -1,0 +1,1258 @@
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/src/components/ui/card"
+import { Badge } from "@/src/components/ui/badge"
+import {
+  BarChart3, BrainCircuit, TrendingUp, TrendingDown, Target,
+  Shield, Calendar, FileText, ArrowUpRight, ArrowDownRight, Cpu,
+  BookOpen, RefreshCw, TrendingUp as TrendUp, AlertTriangle, Zap
+} from "lucide-react"
+import { usePaperTrading } from "@/src/context/PaperTradingContext"
+import { useMarketData } from "@/src/context/MarketDataContext"
+import { useAutoTrading } from "@/src/context/AutoTradingContext"
+import { api, type DailyReport, type EarningsEvent, type FundamentalData } from "@/src/lib/api"
+import { useState, useEffect, useMemo } from "react"
+import { cn } from "@/src/lib/utils"
+import { format, formatDistanceToNow } from "date-fns"
+
+function actionVariant(action?: 'BUY' | 'SELL' | 'HOLD' | 'ADD' | 'TRIM' | 'EXIT' | null) {
+  if (action === 'BUY' || action === 'ADD') return 'success' as const
+  if (action === 'SELL' || action === 'TRIM' || action === 'EXIT') return 'destructive' as const
+  return 'secondary' as const
+}
+
+export function Reports() {
+  const { cashBalance, positions, getPortfolioValue, transactions } = usePaperTrading()
+  const { marketData } = useMarketData()
+  const { engineLogs, cycleCount } = useAutoTrading()
+  const [backendTrades, setBackendTrades] = useState<any[]>([])
+  const [riskEvents, setRiskEvents] = useState<any[]>([])
+  const [upcomingEarnings, setUpcomingEarnings] = useState<EarningsEvent[]>([])
+  const [fundamentals, setFundamentals] = useState<Record<string, FundamentalData>>({})
+  const [overview, setOverview] = useState<any>(null)
+  const [knowledgeProfiles, setKnowledgeProfiles] = useState<Record<string, any>>({})
+  const [knowledgeStatus, setKnowledgeStatus] = useState<any[]>([])
+  const [consolidating, setConsolidating] = useState(false)
+  const [screenerResults, setScreenerResults] = useState<any[]>([])
+  const [recentFilings, setRecentFilings] = useState<any[]>([])
+  const [screeningNow, setScreeningNow] = useState(false)
+  const [sectorData, setSectorData]     = useState<any[]>([])
+  const [weeklyData, setWeeklyData]     = useState<Record<string, any>>({})
+  const [dailyReport, setDailyReport]   = useState<DailyReport | null>(null)
+
+  useEffect(() => {
+    let active = true
+
+    const load = async () => {
+      const [trades, events, earnings, funds, ov, profiles, kStatus, screener, filings, sectors, weekly, report] = await Promise.all([
+        api.getTrades(),
+        api.getRiskEvents(100),
+        api.getUpcomingEarnings(30),
+        api.getFundamentalsAll(),
+        api.getOverview(),
+        api.getKnowledgeProfiles(),
+        api.getKnowledgeStatus(),
+        api.getScreenerResults(),
+        api.getRecentFilings(7),
+        api.getSectorPerformance(),
+        api.getWeeklySnapshots(),
+        api.getDailyReport(),
+      ])
+
+      if (!active) return
+
+      setBackendTrades(trades ?? [])
+      setRiskEvents(events ?? [])
+      setUpcomingEarnings(earnings ?? [])
+      setFundamentals(funds ?? {})
+      setOverview(ov)
+      setKnowledgeProfiles(profiles ?? {})
+      setKnowledgeStatus(kStatus ?? [])
+      setScreenerResults(screener ?? [])
+      setRecentFilings(filings ?? [])
+      setSectorData(sectors ?? [])
+      setWeeklyData(weekly ?? {})
+      setDailyReport(report)
+    }
+
+    load()
+    const interval = setInterval(load, 15_000)
+    return () => {
+      active = false
+      clearInterval(interval)
+    }
+  }, [])
+
+  const handleRunScreener = async () => {
+    setScreeningNow(true)
+    await api.runScreener()
+    setTimeout(async () => {
+      const results = await api.getScreenerResults()
+      setScreenerResults(results ?? [])
+      setScreeningNow(false)
+    }, 8000) // wait for Polygon batch fetch
+  }
+
+  const handleConsolidateAll = async () => {
+    setConsolidating(true)
+    await api.triggerConsolidation()
+    // Reload after 5s (consolidation runs async in backend)
+    setTimeout(async () => {
+      const [profiles, kStatus] = await Promise.all([
+        api.getKnowledgeProfiles(),
+        api.getKnowledgeStatus(),
+      ])
+      setKnowledgeProfiles(profiles ?? {})
+      setKnowledgeStatus(kStatus ?? [])
+      setConsolidating(false)
+    }, 5000)
+  }
+
+  const currentPrices = useMemo(() => {
+    const p: Record<string, number> = {}
+    Object.values(marketData).forEach((d: any) => { if (d?.price) p[d.symbol] = d.price })
+    return p
+  }, [marketData])
+
+  const localTotalValue = getPortfolioValue(currentPrices)
+  const totalValue = dailyReport?.metrics?.currentValue ?? localTotalValue
+  const totalReturn = dailyReport?.metrics?.totalReturnPct ?? ((localTotalValue - 100_000) / 100_000) * 100
+  const drawdown = dailyReport?.metrics?.maxDrawdownPct ?? Math.min(totalReturn, 0)
+
+  // AI Activity Breakdown
+  const aiActivity = useMemo(() => {
+    const hypotheses = engineLogs.filter(l => l.type === 'HYPOTHESIS').length
+    const decisions  = engineLogs.filter(l => l.type === 'DECISION').length
+    const rejected   = engineLogs.filter(l => l.status === 'REJECTED').length
+    const executed   = engineLogs.filter(l => l.status === 'EXECUTED').length
+    return { hypotheses, decisions, rejected, executed }
+  }, [engineLogs])
+
+  // Trade Performance
+  const tradePerformance = useMemo(() => {
+    const trades = backendTrades.length > 0 ? backendTrades : transactions.map(tx => ({
+      id: tx.id, symbol: tx.symbol, action: tx.type,
+      shares: tx.shares, price: tx.price,
+      total_value: tx.shares * tx.price,
+      created_at: Math.floor(tx.timestamp / 1000),
+    }))
+
+    const buys = trades.filter(t => (t.action || t.type) === 'BUY')
+    const sells = trades.filter(t => (t.action || t.type) === 'SELL')
+
+    // For open positions: unrealized P&L
+    const unrealizedPnL = positions.reduce((sum, pos) => {
+      const currentPrice = currentPrices[pos.symbol] || pos.avgPrice
+      return sum + (currentPrice - pos.avgPrice) * pos.shares
+    }, 0)
+
+    // Symbol frequency
+    const symbolCount: Record<string, number> = {}
+    for (const t of trades) {
+      symbolCount[t.symbol] = (symbolCount[t.symbol] || 0) + 1
+    }
+    const topSymbols = Object.entries(symbolCount)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 5)
+
+    return { totalTrades: trades.length, buys: buys.length, sells: sells.length, unrealizedPnL, topSymbols }
+  }, [backendTrades, transactions, positions, currentPrices])
+
+  // Risk Engine Summary
+  const riskSummary = useMemo(() => {
+    const blocked = riskEvents.filter(e => !e.allowed)
+    const byCheck: Record<string, number> = {}
+    for (const e of blocked) {
+      const check = e.failed_check || 'Unknown'
+      byCheck[check] = (byCheck[check] || 0) + 1
+    }
+    return {
+      total: riskEvents.length,
+      blocked: blocked.length,
+      passed: riskEvents.filter(e => e.allowed).length,
+      byCheck: Object.entries(byCheck).sort(([, a], [, b]) => b - a),
+    }
+  }, [riskEvents])
+
+  const candidateSummary = dailyReport?.candidates ?? []
+  const candidateFunnel = dailyReport?.candidateFunnel
+  const executionSummary = dailyReport?.executionAttempts ?? []
+  const executionLifecycle = dailyReport?.executionSummary
+  const constructionSummary = dailyReport?.constructionSummary
+  const executionOps = dailyReport?.executionOps
+  const brokerOps = dailyReport?.brokerOps
+  const dataSources = dailyReport?.dataFreshness?.sources ?? []
+  const sourceAttribution = dailyReport?.metrics?.attribution?.bySource ?? []
+  const executionQuality = dailyReport?.metrics?.executionQuality
+  const decisionTrail = dailyReport?.decisionTrail ?? []
+  const blockedDecisions = dailyReport?.blockedDecisions ?? []
+  const operatorSummary = dailyReport?.operatorSummary
+  const riskFromReport = dailyReport?.risk
+  const agentFromReport = dailyReport?.agent
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight text-zinc-50">Reports</h2>
+          <p className="text-sm text-zinc-400">
+            {operatorSummary ?? `Performance summary • Generated ${format(new Date(), 'MMM d, yyyy HH:mm')}`}
+          </p>
+        </div>
+        <Badge variant={totalReturn >= 0 ? 'success' : 'destructive'} className="text-sm px-3 py-1">
+          {totalReturn >= 0 ? '+' : ''}{totalReturn.toFixed(2)}% Total Return
+        </Badge>
+      </div>
+
+      {/* Performance Overview */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {[
+          {
+            label: "Portfolio Value",
+            value: `$${totalValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+            sub: `${totalReturn >= 0 ? '+' : ''}${totalReturn.toFixed(2)}% vs $100k start`,
+            icon: BarChart3, ok: totalReturn >= 0,
+          },
+          {
+            label: "Unrealized P&L",
+            value: `${tradePerformance.unrealizedPnL >= 0 ? '+' : ''}$${Math.abs(tradePerformance.unrealizedPnL).toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+            sub: `${positions.length} open positions`,
+            icon: TrendingUp, ok: tradePerformance.unrealizedPnL >= 0,
+          },
+          {
+            label: "Total Trades",
+            value: `${tradePerformance.totalTrades}`,
+            sub: `${tradePerformance.buys} BUY / ${tradePerformance.sells} SELL`,
+            icon: Target, ok: true,
+          },
+          {
+            label: "Risk Blocks",
+            value: `${riskFromReport?.blocked ?? riskSummary.blocked}`,
+            sub: `of ${riskFromReport?.total ?? riskSummary.total} risk checks`,
+            icon: Shield, ok: true,
+          },
+        ].map(({ label, value, sub, icon: Icon, ok }) => (
+          <Card key={label}>
+            <CardContent className="pt-4 pb-3">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-zinc-400">{label}</span>
+                <Icon className={cn("h-4 w-4", ok ? "text-emerald-500" : "text-red-400")} />
+              </div>
+              <div className={cn("text-xl font-bold", ok ? "text-zinc-50" : "text-red-400")}>{value}</div>
+              <div className="text-xs text-zinc-500 mt-0.5">{sub}</div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      <div className="grid gap-6 md:grid-cols-2">
+        {/* AI Engine Activity */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <BrainCircuit className="h-4 w-4 text-blue-400" />
+              AI Engine Activity
+            </CardTitle>
+            <CardDescription>
+              {(agentFromReport?.cycleCount ?? cycleCount)} cycles · {(agentFromReport?.mode ?? 'paper')} mode · {(agentFromReport?.degraded ? 'degraded' : 'stable')}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {[
+              { label: "Articles Analyzed", value: overview?.processedArticles ?? aiActivity.hypotheses, color: "bg-blue-500" },
+              { label: "Signals Generated", value: aiActivity.decisions + aiActivity.rejected, color: "bg-purple-500" },
+              { label: "Trades Executed", value: aiActivity.executed, color: "bg-emerald-500" },
+              { label: "Signals Rejected", value: aiActivity.rejected, color: "bg-amber-500" },
+            ].map(({ label, value, color }) => (
+              <div key={label} className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className={cn("h-2 w-2 rounded-full", color)} />
+                  <span className="text-sm text-zinc-300">{label}</span>
+                </div>
+                <span className="text-sm font-mono font-medium text-zinc-50">{value}</span>
+              </div>
+            ))}
+
+            {/* DB stats from backend */}
+            {overview && (
+              <div className="mt-4 pt-4 border-t border-zinc-800 space-y-2">
+                <p className="text-xs text-zinc-500 mb-2">Lifetime (database)</p>
+                <div className="flex justify-between text-xs">
+                  <span className="text-zinc-400">Total articles seen</span>
+                  <span className="text-zinc-300 font-mono">{overview.totalArticles}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-zinc-400">Total analyses stored</span>
+                  <span className="text-zinc-300 font-mono">{overview.totalAnalyses}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-zinc-400">Total trades in DB</span>
+                  <span className="text-zinc-300 font-mono">{overview.totalTrades}</span>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Risk Engine Summary */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Shield className="h-4 w-4 text-amber-400" />
+              Risk Engine Summary
+            </CardTitle>
+            <CardDescription>
+              {riskSummary.passed} passed / {riskSummary.blocked} blocked
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {riskSummary.byCheck.length === 0 ? (
+              <p className="text-sm text-zinc-500 text-center py-4">
+                No risk blocks yet — engine hasn't executed trades.
+              </p>
+            ) : (
+              <>
+                <p className="text-xs text-zinc-500 mb-2">Most frequent block reasons:</p>
+                {riskSummary.byCheck.map(([check, count]) => (
+                  <div key={check} className="flex items-center justify-between text-sm">
+                    <span className="text-zinc-300 truncate">{check}</span>
+                    <Badge variant="warning" className="text-xs ml-2 shrink-0">{count}x blocked</Badge>
+                  </div>
+                ))}
+              </>
+            )}
+
+            {/* Current portfolio risk */}
+            <div className="mt-4 pt-4 border-t border-zinc-800 space-y-2">
+              <p className="text-xs text-zinc-500 mb-2">Current risk state</p>
+              <div className="flex justify-between text-xs">
+                <span className="text-zinc-400">Drawdown from start</span>
+                <span className={cn("font-mono", drawdown < -5 ? "text-red-400" : "text-zinc-300")}>
+                  {drawdown.toFixed(1)}%
+                </span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-zinc-400">Cash reserve</span>
+                <span className="text-zinc-300 font-mono">
+                  {totalValue > 0 ? ((cashBalance / totalValue) * 100).toFixed(1) : '100.0'}%
+                </span>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-6 md:grid-cols-3">
+        <Card className="md:col-span-1">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Cpu className="h-4 w-4 text-cyan-400" />
+              Candidate Funnel
+            </CardTitle>
+            <CardDescription>
+              {candidateFunnel
+                ? `${candidateFunnel.total} total · ${candidateFunnel.executed} executed · ${candidateFunnel.blocked} blocked`
+                : 'Latest deterministic trade candidates'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {candidateFunnel && (
+              <div className="grid grid-cols-4 gap-2 pb-2">
+                {[
+                  { label: "New", value: candidateFunnel.new },
+                  { label: "In Flight", value: candidateFunnel.inFlight },
+                  { label: "Executed", value: candidateFunnel.executed },
+                  { label: "Blocked", value: candidateFunnel.blocked },
+                ].map(item => (
+                  <div key={item.label} className="rounded-md bg-zinc-900/40 px-2 py-2 text-center">
+                    <div className="text-[10px] text-zinc-500">{item.label}</div>
+                    <div className="text-sm font-semibold text-zinc-50">{item.value}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {candidateSummary.length === 0 ? (
+              <p className="text-sm text-zinc-500">No recent candidates yet.</p>
+            ) : candidateSummary.slice(0, 6).map((candidate: any) => (
+              <div key={candidate.id} className="flex items-center justify-between rounded-md bg-zinc-900/40 px-3 py-2 text-sm">
+                <div>
+                  <div className="font-medium text-zinc-50">{candidate.symbol}</div>
+                  <div className="text-xs text-zinc-500 truncate max-w-44">{candidate.reasoning}</div>
+                </div>
+                <div className="text-right shrink-0">
+                  <Badge variant={actionVariant(candidate.decisionAction ?? candidate.action)} className="text-xs">
+                    {candidate.decisionAction ?? candidate.action}
+                  </Badge>
+                  <div className="text-xs text-zinc-400 mt-1">{candidate.confidence}%</div>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card className="md:col-span-1">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <AlertTriangle className="h-4 w-4 text-orange-400" />
+              Execution Lifecycle
+            </CardTitle>
+            <CardDescription>
+              {executionLifecycle
+                ? `${executionLifecycle.filled} filled · ${executionLifecycle.partiallyFilled} partial · ${executionLifecycle.rejected} rejected · ${executionLifecycle.fillRate ?? '—'}% fill rate`
+                : 'Persistent execution attempts and outcomes'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {executionSummary.length === 0 ? (
+              <p className="text-sm text-zinc-500">No execution attempts yet.</p>
+            ) : executionSummary.slice(0, 6).map((attempt: any) => (
+              <div key={attempt.id} className="flex items-center justify-between rounded-md bg-zinc-900/40 px-3 py-2 text-sm">
+                <div>
+                  <div className="font-medium text-zinc-50">{attempt.symbol} {attempt.action}</div>
+                  <div className="text-xs text-zinc-500">
+                    {attempt.mode} · {attempt.status}
+                    {attempt.action === 'BUY' && attempt.baseTargetWeight !== null && attempt.baseTargetWeight !== undefined
+                      ? ` · ${(attempt.baseTargetWeight * 100).toFixed(1)}% -> ${(attempt.adjustedTargetWeight * 100).toFixed(1)}%`
+                      : ''}
+                  </div>
+                  {attempt.action === 'BUY' && attempt.constructionReason ? (
+                    <div className="text-[11px] text-zinc-600">
+                      {(attempt.constructionBand ?? 'clean')} · {attempt.constructionReason}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="text-right text-xs text-zinc-400">
+                  {attempt.fillPrice ? `$${attempt.fillPrice.toFixed(2)}` : attempt.error || 'pending'}
+                </div>
+              </div>
+            ))}
+            {constructionSummary ? (
+              <div className="grid grid-cols-3 gap-2 pt-2">
+                {[
+                  { label: 'Clean', value: constructionSummary.clean },
+                  { label: 'Reduced', value: constructionSummary.reduced },
+                  { label: 'Severe', value: constructionSummary.severe },
+                ].map(item => (
+                  <div key={item.label} className="rounded-md bg-zinc-950/70 px-2 py-2 text-center">
+                    <div className="text-[10px] text-zinc-500">{item.label}</div>
+                    <div className="text-sm font-semibold text-zinc-50">{item.value}</div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card className="md:col-span-1">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <RefreshCw className="h-4 w-4 text-blue-400" />
+              Execution Ops
+            </CardTitle>
+            <CardDescription>
+              {executionOps
+                ? `${executionOps.active} active · ${executionOps.stale} stale · ${executionOps.autoRecoveryTagged} auto-recovery events`
+                : 'Autonomous execution monitoring and recovery'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {executionOps && (
+              <div className="grid grid-cols-3 gap-2 pb-2">
+                {[
+                  { label: 'Submitted', value: executionOps.submitted },
+                  { label: 'Partial', value: executionOps.partiallyFilled },
+                  { label: 'Stale', value: executionOps.stale },
+                ].map(item => (
+                  <div key={item.label} className="rounded-md bg-zinc-900/40 px-2 py-2 text-center">
+                    <div className="text-[10px] text-zinc-500">{item.label}</div>
+                    <div className="text-sm font-semibold text-zinc-50">{item.value}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {executionOps?.items?.length ? executionOps.items.map((item: any) => (
+              <div key={item.id} className={cn(
+                "flex items-center justify-between rounded-md px-3 py-2 text-sm",
+                item.stale ? "border border-amber-500/20 bg-amber-950/20" : "bg-zinc-900/40"
+              )}>
+                <div>
+                  <div className="font-medium text-zinc-50">{item.symbol} {item.action}</div>
+                  <div className="text-xs text-zinc-500">
+                    {item.status} · {item.ageMinutes.toFixed(1)}m old
+                    {item.filledShares ? ` · ${item.filledShares}/${item.plannedShares ?? item.filledShares} filled` : ''}
+                  </div>
+                  <div className="text-[11px] text-zinc-500">
+                    {(item.rolloutProfile || item.sessionRegime) ? `${item.rolloutProfile ?? 'legacy'} · ${item.sessionRegime ?? 'legacy'} · ` : ''}
+                    {item.retryCount > 0 ? `${item.retryCount}/${item.maxResubmits} resubmits used` : `0/${item.maxResubmits} resubmits used`} · {item.policyReason}
+                  </div>
+                  <div className="text-[11px] text-zinc-600">
+                    stale after {item.staleAfterMinutes.toFixed(1)}m · cooldown {item.resubmitCooldownMinutes.toFixed(1)}m · {item.recoveryTimingReason}
+                  </div>
+                  <div className="text-[11px] text-zinc-600">
+                    resubmit size {item.resubmitSizePct}% · {item.allowPartialResubmit ? 'partial retries enabled' : 'stop after partial fill'} · {item.resubmitStrategyReason}
+                  </div>
+                </div>
+                <div className="text-right shrink-0 space-y-1">
+                  <div>
+                    <Badge variant={item.stale ? "warning" : "secondary"} className="text-[10px]">
+                      {item.stale ? 'stale' : 'active'}
+                    </Badge>
+                  </div>
+                  <div>
+                    <Badge
+                      variant={item.policyBand === 'blocked' ? "destructive" : item.policyBand === 'loosened' ? "success" : item.policyBand === 'tightened' ? "warning" : "secondary"}
+                      className="text-[10px]"
+                    >
+                      {item.policyBand}
+                    </Badge>
+                  </div>
+                  <div>
+                    <Badge
+                      variant={item.recoveryTimingBand === 'extended' ? "warning" : item.recoveryTimingBand === 'accelerated' ? "success" : "secondary"}
+                      className="text-[10px]"
+                    >
+                      {item.recoveryTimingBand}
+                    </Badge>
+                  </div>
+                  <div>
+                    <Badge
+                      variant={item.resubmitStrategyBand === 'halt_partial' ? "destructive" : item.resubmitStrategyBand === 'reduced' ? "warning" : item.resubmitStrategyBand === 'aggressive' ? "success" : "secondary"}
+                      className="text-[10px]"
+                    >
+                      {item.resubmitStrategyBand}
+                    </Badge>
+                  </div>
+                </div>
+              </div>
+            )) : (
+              <p className="text-sm text-zinc-500">No in-flight execution attempts.</p>
+            )}
+            <div className="pt-3 border-t border-zinc-800 space-y-2">
+              <div className="text-xs text-zinc-500">Worker heartbeat</div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-zinc-400">Reconciliation</span>
+                <span className="text-zinc-300">
+                  {brokerOps?.reconciliation?.lastSuccessAt
+                    ? formatDistanceToNow(new Date(brokerOps.reconciliation.lastSuccessAt), { addSuffix: true })
+                    : 'never'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-zinc-400">Recovery</span>
+                <span className="text-zinc-300">
+                  {brokerOps?.recovery?.lastSuccessAt
+                    ? formatDistanceToNow(new Date(brokerOps.recovery.lastSuccessAt), { addSuffix: true })
+                    : 'never'}
+                </span>
+              </div>
+              {(brokerOps?.recovery?.lastError || brokerOps?.reconciliation?.lastError) && (
+                <div className="text-[11px] text-red-300 leading-relaxed">
+                  {brokerOps?.recovery?.lastError ?? brokerOps?.reconciliation?.lastError}
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-6 md:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <RefreshCw className="h-4 w-4 text-blue-400" />
+              Data Freshness
+            </CardTitle>
+            <CardDescription>Backend data-source heartbeat</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {dataSources.length === 0 ? (
+              <p className="text-sm text-zinc-500">No data-source telemetry yet.</p>
+            ) : dataSources.slice(0, 8).map((source: any) => (
+              <div key={source.source} className="flex items-center justify-between text-sm">
+                <span className="text-zinc-300">{source.source}</span>
+                <span className={cn(
+                  "text-xs font-medium",
+                  source.status === 'ok' ? "text-emerald-400" : source.status === 'error' ? "text-red-400" : "text-amber-400"
+                )}>
+                  {source.status}
+                </span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Zap className="h-4 w-4 text-yellow-400" />
+              Recovery Notes
+            </CardTitle>
+            <CardDescription>Autonomous safeguards for stuck broker execution</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm text-zinc-300">
+            {[
+              'Submitted orders older than about 2 minutes are treated as stale.',
+              'If thesis and limits still pass, stale orders are autonomously resubmitted on the remaining quantity.',
+              'Partially filled orders older than about 5 minutes are either resubmitted on the remainder or cancelled and preserved as partial outcomes.',
+            ].map(line => (
+              <div key={line} className="rounded-md bg-zinc-900/40 px-3 py-2 text-xs text-zinc-400">
+                {line}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-6 md:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ArrowUpRight className="h-4 w-4 text-emerald-400" />
+              Why Bought / Sold
+            </CardTitle>
+            <CardDescription>Linked candidate reasoning, sources and execution outcome</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {decisionTrail.length === 0 ? (
+              <p className="text-sm text-zinc-500">No linked decision trail yet.</p>
+            ) : decisionTrail.slice(0, 6).map((row: any) => {
+              const displayAction = row.decisionAction ?? row.action
+              return (
+              <div key={row.candidateId} className="rounded-md bg-zinc-900/40 px-3 py-3 text-sm space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-zinc-50">{row.symbol}</span>
+                    <Badge variant={actionVariant(displayAction)} className="text-xs">
+                      {displayAction}
+                    </Badge>
+                    <Badge variant="secondary" className="text-xs">{row.confidence}%</Badge>
+                  </div>
+                  <span className="text-xs text-zinc-500">
+                    {formatDistanceToNow(new Date(row.updatedAt * 1000), { addSuffix: true })}
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-300 leading-relaxed">{row.reasoning}</p>
+                {row.heldOutReason && (
+                  <p className="text-[11px] text-amber-400">{row.heldOutReason}</p>
+                )}
+                <div className="flex flex-wrap gap-1">
+                  {row.sourceTypes.map((source: string) => (
+                    <Badge key={source} variant="outline" className="text-[10px] uppercase">{source}</Badge>
+                  ))}
+                  <Badge variant="secondary" className="text-[10px]">{row.candidateStatus}</Badge>
+                  {row.executionStatus && <Badge variant="secondary" className="text-[10px]">{row.executionStatus}</Badge>}
+                </div>
+                {row.eventTitles.length > 0 && (
+                  <div className="text-[11px] text-zinc-500">{row.eventTitles.join(' • ')}</div>
+                )}
+              </div>
+            )})}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ArrowDownRight className="h-4 w-4 text-red-400" />
+              Blocked / Rejected
+            </CardTitle>
+            <CardDescription>Most recent candidates stopped by market, risk or execution checks</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {blockedDecisions.length === 0 ? (
+              <p className="text-sm text-zinc-500">No blocked decisions in the current report window.</p>
+            ) : blockedDecisions.map((row: any) => (
+              <div key={row.candidateId} className="rounded-md border border-red-500/15 bg-red-950/20 px-3 py-3 text-sm space-y-1">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-zinc-50">{row.symbol}</span>
+                    <Badge variant="destructive" className="text-xs">{row.executionStatus ?? row.candidateStatus}</Badge>
+                  </div>
+                  <span className="text-xs text-zinc-500">{row.confidence}%</span>
+                </div>
+                <p className="text-xs text-zinc-300 leading-relaxed">{row.reasoning}</p>
+                {row.eventTitles.length > 0 && (
+                  <div className="text-[11px] text-zinc-500">{row.eventTitles.join(' • ')}</div>
+                )}
+              </div>
+            ))}
+
+            {(riskFromReport?.topBlockReasons?.length ?? 0) > 0 && (
+              <div className="pt-3 border-t border-zinc-800 space-y-2">
+                <div className="text-xs text-zinc-500">Top block reasons</div>
+                {riskFromReport?.topBlockReasons.map((item: any) => (
+                  <div key={item.reason} className="flex items-center justify-between text-xs">
+                    <span className="text-zinc-400 truncate">{item.reason}</span>
+                    <span className="text-zinc-300 font-mono">{item.count}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {sourceAttribution.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Zap className="h-4 w-4 text-amber-400" />
+              Realized P&L by Research Source
+            </CardTitle>
+            <CardDescription>Attribution from filled trades to dominant linked research source</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {sourceAttribution.slice(0, 6).map((row: any) => (
+                <div key={row.key} className="flex items-center justify-between rounded-md bg-zinc-900/40 px-3 py-2 text-sm">
+                  <div>
+                    <div className="font-medium text-zinc-50">{row.key}</div>
+                    <div className="text-xs text-zinc-500">{row.trades} trades · {row.winRate ?? '—'}% win rate</div>
+                  </div>
+                  <div className={cn("font-mono text-xs", row.realizedPnl >= 0 ? "text-emerald-400" : "text-red-400")}>
+                    {row.realizedPnl >= 0 ? '+' : ''}${Math.abs(row.realizedPnl).toFixed(0)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {executionQuality && executionQuality.totalFillOutcomes > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <TrendUp className="h-4 w-4 text-cyan-400" />
+              Fill Quality
+            </CardTitle>
+            <CardDescription>
+              {executionQuality.totalFillOutcomes} fill outcomes · {executionQuality.resubmittedOutcomes} via resubmit path
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {[
+                { label: 'Avg Latency', value: executionQuality.avgLatencySeconds !== null ? `${executionQuality.avgLatencySeconds}s` : '—' },
+                { label: 'Avg |Slip|', value: executionQuality.avgAbsSlippageBps !== null ? `${executionQuality.avgAbsSlippageBps} bps` : '—' },
+                { label: '1st Pass |Slip|', value: executionQuality.firstPassAvgAbsSlippageBps !== null ? `${executionQuality.firstPassAvgAbsSlippageBps} bps` : '—' },
+                { label: 'Resubmit |Slip|', value: executionQuality.resubmitAvgAbsSlippageBps !== null ? `${executionQuality.resubmitAvgAbsSlippageBps} bps` : '—' },
+              ].map(item => (
+                <div key={item.label} className="rounded-md bg-zinc-900/40 px-3 py-2">
+                  <div className="text-[10px] text-zinc-500">{item.label}</div>
+                  <div className="text-sm font-semibold text-zinc-50">{item.value}</div>
+                </div>
+              ))}
+            </div>
+            {executionQuality.worstCases.length > 0 && (
+              <div className="space-y-2">
+                <div className="text-xs text-zinc-500">Worst slippage / latency cases</div>
+                {executionQuality.worstCases.slice(0, 4).map((item: any) => (
+                  <div key={item.id} className="flex items-center justify-between rounded-md bg-zinc-900/40 px-3 py-2 text-sm">
+                    <div>
+                      <div className="font-medium text-zinc-50">{item.symbol} {item.action}</div>
+                      <div className="text-xs text-zinc-500">
+                        {item.status} · {item.retryCount > 0 ? `${item.retryCount} resubmit` : 'first pass'} · {item.latencySeconds}s
+                      </div>
+                    </div>
+                    <div className="text-right text-xs">
+                      <div className="text-zinc-300">{item.absSlippageBps ?? '—'} bps</div>
+                      <div className="text-zinc-500">{item.filledShares ?? 0}/{item.plannedShares ?? item.filledShares ?? 0} filled</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Screener Results */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Target className="h-4 w-4 text-emerald-400" />
+                Daily Screener — Top Candidates
+              </CardTitle>
+              <CardDescription>
+                {screenerResults.length > 0
+                  ? `${screenerResults.length} candidates from ~75 universe stocks — updated ${screenerResults[0]?.screenedAt ? format(new Date(screenerResults[0].screenedAt), 'HH:mm') : 'today'}`
+                  : 'Scans 75+ stocks for unusual volume, price action, and RSI extremes'
+                }
+              </CardDescription>
+            </div>
+            <button
+              onClick={handleRunScreener}
+              disabled={screeningNow}
+              className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-50 transition-colors"
+            >
+              <RefreshCw className={cn("h-3 w-3", screeningNow && "animate-spin")} />
+              {screeningNow ? "Scanning..." : "Run Screen"}
+            </button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {screenerResults.length === 0 ? (
+            <div className="text-center py-6 space-y-2">
+              <BarChart3 className="h-8 w-8 text-zinc-700 mx-auto" />
+              <p className="text-sm text-zinc-400">No screener results yet</p>
+              <p className="text-xs text-zinc-500">Click "Run Screen" or wait for the 6:30 AM daily run</p>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {screenerResults.map((c: any) => (
+                <div key={c.symbol} className={cn(
+                  "flex items-center justify-between rounded-md px-3 py-2 text-sm",
+                  c.isCore ? "bg-zinc-800/60" : "bg-zinc-900/40"
+                )}>
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="font-bold text-zinc-50 w-12">{c.symbol}</span>
+                    <span className="text-zinc-500 text-xs hidden sm:block">{c.sector}</span>
+                    <span className={cn(
+                      "font-mono text-xs",
+                      c.changePercent >= 0 ? "text-emerald-400" : "text-red-400"
+                    )}>
+                      {c.changePercent >= 0 ? '+' : ''}{c.changePercent.toFixed(1)}%
+                    </span>
+                    {c.volumeRatio >= 1.5 && (
+                      <span className="text-amber-400 text-xs">{c.volumeRatio.toFixed(1)}x vol</span>
+                    )}
+                    <span className="text-zinc-500 text-xs truncate hidden md:block">
+                      {c.signals?.[0] ?? ''}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {c.rsi14 && (
+                      <span className={cn(
+                        "text-xs font-mono",
+                        c.rsi14 <= 35 ? "text-emerald-400" : c.rsi14 >= 68 ? "text-red-400" : "text-zinc-400"
+                      )}>
+                        RSI {c.rsi14.toFixed(0)}
+                      </span>
+                    )}
+                    <Badge variant={c.score >= 50 ? "success" : c.score >= 25 ? "warning" : "secondary"} className="text-xs">
+                      {c.score.toFixed(0)}pts
+                    </Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 8-K Filings */}
+      {(recentFilings.length > 0) && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FileText className="h-4 w-4 text-orange-400" />
+              Recent SEC 8-K Filings (Material Events)
+            </CardTitle>
+            <CardDescription>Official company disclosures — analyzed by the agent as priority news</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {recentFilings.map((f: any) => (
+                <div key={f.id} className={cn(
+                  "flex items-center justify-between rounded-md px-3 py-2 text-sm",
+                  f.processed ? "bg-zinc-900/30" : "bg-orange-950/30 border border-orange-500/20"
+                )}>
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="font-bold text-zinc-50 w-12">{f.symbol}</span>
+                    <Badge variant={f.processed ? "secondary" : "warning"} className="text-xs">
+                      {f.form}
+                    </Badge>
+                    <span className="text-zinc-300 text-xs truncate">{f.description}</span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-zinc-500 text-xs">{f.filed}</span>
+                    <Badge variant={f.processed ? "secondary" : "default"} className="text-xs">
+                      {f.processed ? "analyzed" : "pending"}
+                    </Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Knowledge Base */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <BookOpen className="h-4 w-4 text-indigo-400" />
+                AI Knowledge Base
+              </CardTitle>
+              <CardDescription>
+                Compound investment profiles built from accumulated analyses. Injected into every Gemini prompt.
+              </CardDescription>
+            </div>
+            <button
+              onClick={handleConsolidateAll}
+              disabled={consolidating}
+              className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-50 transition-colors"
+            >
+              <RefreshCw className={cn("h-3 w-3", consolidating && "animate-spin")} />
+              {consolidating ? "Consolidating..." : "Consolidate All"}
+            </button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {/* Knowledge status overview */}
+          {knowledgeStatus.length > 0 && (
+            <div className="grid grid-cols-2 gap-2 mb-4 sm:grid-cols-4">
+              {knowledgeStatus.slice(0, 4).map((s: any) => (
+                <div key={s.symbol} className={cn(
+                  "rounded-md px-3 py-2 text-xs",
+                  s.hasProfile ? "bg-indigo-950/40 border border-indigo-500/30" : "bg-zinc-900"
+                )}>
+                  <div className="font-medium text-zinc-50">{s.symbol}</div>
+                  <div className="text-zinc-400">{s.analyses} analyses</div>
+                  <div className={cn("mt-0.5 font-medium", s.hasProfile ? "text-indigo-400" : "text-zinc-600")}>
+                    {s.hasProfile ? `Profile v${s.lastConsolidated}` : s.analyses >= 5 ? "Ready to consolidate" : `${5 - s.analyses} more needed`}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Profiles */}
+          {Object.keys(knowledgeProfiles).length === 0 ? (
+            <div className="text-center py-8 space-y-2">
+              <BookOpen className="h-8 w-8 text-zinc-700 mx-auto" />
+              <p className="text-sm text-zinc-400 font-medium">No profiles yet</p>
+              <p className="text-xs text-zinc-500">
+                Profiles build automatically after 5+ analyses per symbol.<br />
+                Start the agent and let it run through several news cycles.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {Object.entries(knowledgeProfiles).map(([symbol, profile]: [string, any]) => (
+                <div key={symbol} className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-zinc-50 text-base">{symbol}</span>
+                      <Badge variant="secondary" className="text-xs">
+                        {profile.analysis_count} analyses
+                      </Badge>
+                      {profile.avg_confidence && (
+                        <Badge variant={profile.avg_confidence >= 70 ? "success" : "warning"} className="text-xs">
+                          avg {profile.avg_confidence.toFixed(0)}% conf
+                        </Badge>
+                      )}
+                    </div>
+                    <span className="text-xs text-zinc-600">
+                      Updated {format(new Date(profile.updated_at), 'MMM d')}
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <TrendUp className="h-3.5 w-3.5 text-emerald-400 mt-0.5 shrink-0" />
+                      <p className="text-xs text-zinc-300"><span className="text-emerald-400 font-medium">Bull: </span>{profile.bull_thesis}</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <TrendingDown className="h-3.5 w-3.5 text-red-400 mt-0.5 shrink-0" />
+                      <p className="text-xs text-zinc-300"><span className="text-red-400 font-medium">Bear: </span>{profile.bear_thesis}</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Zap className="h-3.5 w-3.5 text-amber-400 mt-0.5 shrink-0" />
+                      <p className="text-xs text-zinc-300"><span className="text-amber-400 font-medium">Sensitivity: </span>{profile.news_sensitivity}</p>
+                    </div>
+                    {profile.pattern_notes && (
+                      <div className="flex gap-2">
+                        <BarChart3 className="h-3.5 w-3.5 text-blue-400 mt-0.5 shrink-0" />
+                        <p className="text-xs text-zinc-300"><span className="text-blue-400 font-medium">Patterns: </span>{profile.pattern_notes}</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Sector Rotation Heatmap */}
+      {sectorData.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <TrendingUp className="h-4 w-4 text-zinc-400" />
+              Sector Rotation Heatmap
+            </CardTitle>
+            <CardDescription>Relative strength across sectors — drives confidence adjustments</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-1.5">
+              <div className="grid grid-cols-5 text-xs text-zinc-500 px-2 pb-1 border-b border-zinc-800">
+                <span className="col-span-2">Sector</span>
+                <span className="text-right">1W</span>
+                <span className="text-right">1M</span>
+                <span className="text-right">vs Mkt</span>
+              </div>
+              {sectorData.map((s: any) => {
+                const trendColors: Record<string, string> = {
+                  strong_inflow:   'text-emerald-400',
+                  inflow:          'text-emerald-300',
+                  neutral:         'text-zinc-400',
+                  outflow:         'text-red-300',
+                  strong_outflow:  'text-red-400',
+                }
+                const bgColors: Record<string, string> = {
+                  strong_inflow:  'bg-emerald-950/50 border-l-2 border-emerald-500',
+                  inflow:         'bg-emerald-950/20',
+                  neutral:        '',
+                  outflow:        'bg-red-950/20',
+                  strong_outflow: 'bg-red-950/50 border-l-2 border-red-500',
+                }
+                const arrows: Record<string, string> = {
+                  strong_inflow: '↑↑', inflow: '↑', neutral: '→',
+                  outflow: '↓', strong_outflow: '↓↓',
+                }
+                return (
+                  <div key={s.sector} className={cn(
+                    "grid grid-cols-5 items-center rounded px-2 py-1.5 text-sm",
+                    bgColors[s.trend]
+                  )}>
+                    <div className="col-span-2 flex items-center gap-2">
+                      <span className={cn("font-medium text-xs", trendColors[s.trend])}>
+                        {arrows[s.trend]}
+                      </span>
+                      <span className="text-zinc-200 text-xs">{s.sector}</span>
+                    </div>
+                    <span className={cn(
+                      "text-right font-mono text-xs",
+                      s.return1w >= 0 ? "text-emerald-400" : "text-red-400"
+                    )}>
+                      {s.return1w >= 0 ? '+' : ''}{s.return1w.toFixed(1)}%
+                    </span>
+                    <span className={cn(
+                      "text-right font-mono text-xs",
+                      s.return1m >= 0 ? "text-emerald-400" : "text-red-400"
+                    )}>
+                      {s.return1m >= 0 ? '+' : ''}{s.return1m.toFixed(1)}%
+                    </span>
+                    <span className={cn(
+                      "text-right font-mono text-xs",
+                      s.relStrength >= 0 ? "text-emerald-400" : "text-red-400"
+                    )}>
+                      {s.relStrength >= 0 ? '+' : ''}{s.relStrength.toFixed(1)}%
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Multi-Timeframe Weekly Snapshots */}
+      {Object.keys(weeklyData).length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <BarChart3 className="h-4 w-4 text-zinc-400" />
+              Multi-Timeframe Analysis (Weekly)
+            </CardTitle>
+            <CardDescription>Weekly RSI and trend context — reduces daily noise for the agent</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-1">
+              <div className="grid grid-cols-5 text-xs text-zinc-500 px-2 pb-1 border-b border-zinc-800">
+                <span>Symbol</span>
+                <span className="text-right">W-RSI</span>
+                <span className="text-center">Weekly</span>
+                <span className="text-center">Multi-Frame</span>
+                <span className="text-center">Confluence</span>
+              </div>
+              {Object.entries(weeklyData).map(([sym, snap]: [string, any]) => {
+                if (!snap) return null
+                const rsiColor = snap.weeklyRSI < 35 ? 'text-emerald-400' : snap.weeklyRSI > 68 ? 'text-red-400' : 'text-zinc-300'
+                const trendArrow = snap.weeklyTrend === 'up' ? '↑' : snap.weeklyTrend === 'down' ? '↓' : '→'
+                const mfColors: Record<string, string> = {
+                  confirmed_bull: 'text-emerald-400',
+                  bull_caution:   'text-amber-400',
+                  neutral:        'text-zinc-400',
+                  bear_caution:   'text-amber-400',
+                  confirmed_bear: 'text-red-400',
+                }
+                return (
+                  <div key={sym} className="grid grid-cols-5 items-center rounded px-2 py-1 text-xs hover:bg-zinc-900/30">
+                    <span className="font-bold text-zinc-50">{sym}</span>
+                    <span className={cn("text-right font-mono", rsiColor)}>
+                      {snap.weeklyRSI?.toFixed(0) ?? '—'}
+                    </span>
+                    <span className={cn(
+                      "text-center",
+                      snap.weeklyTrend === 'up' ? 'text-emerald-400' : snap.weeklyTrend === 'down' ? 'text-red-400' : 'text-zinc-400'
+                    )}>
+                      {trendArrow}
+                    </span>
+                    <span className={cn("text-center text-[10px]", mfColors[snap.multiframeTrend] ?? 'text-zinc-400')}>
+                      {snap.multiframeTrend?.replace(/_/g, ' ')}
+                    </span>
+                    <span className={cn(
+                      "text-center",
+                      snap.confluence === 'high' ? 'text-emerald-500' : snap.confluence === 'low' ? 'text-amber-400' : 'text-zinc-400'
+                    )}>
+                      {snap.confluence}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Top Traded Symbols */}
+      {tradePerformance.topSymbols.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Cpu className="h-4 w-4 text-zinc-400" />
+              Most Traded Symbols
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              {tradePerformance.topSymbols.map(([symbol, count]) => {
+                const f = fundamentals[symbol]
+                const currentPrice = currentPrices[symbol]
+                return (
+                  <div key={symbol} className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <span className="font-bold text-zinc-50 w-12">{symbol}</span>
+                      {currentPrice && (
+                        <span className="text-sm text-zinc-400 font-mono">${currentPrice.toFixed(2)}</span>
+                      )}
+                      {f?.peRatio && (
+                        <span className="text-xs text-zinc-500">P/E {f.peRatio.toFixed(0)}</span>
+                      )}
+                      {f?.revenueGrowth !== null && f?.revenueGrowth !== undefined && (
+                        <span className={cn(
+                          "text-xs",
+                          f.revenueGrowth >= 0.1 ? "text-emerald-400" : "text-zinc-500"
+                        )}>
+                          Rev {f.revenueGrowth >= 0 ? '+' : ''}{(f.revenueGrowth * 100).toFixed(0)}%
+                        </span>
+                      )}
+                    </div>
+                    <Badge variant="secondary">{count} trades</Badge>
+                  </div>
+                )
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Upcoming Earnings */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Calendar className="h-4 w-4 text-purple-400" />
+            Earnings Calendar (next 30 days)
+          </CardTitle>
+          <CardDescription>
+            BUY orders automatically blocked 1 day before earnings
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {upcomingEarnings.length === 0 ? (
+            <p className="text-sm text-zinc-500 text-center py-4">No upcoming earnings data. Start the engine to load.</p>
+          ) : (
+            <div className="space-y-2">
+              {upcomingEarnings.map((e) => {
+                const f = fundamentals[e.symbol]
+                const isHeld = positions.some(p => p.symbol === e.symbol)
+                return (
+                  <div key={e.symbol + e.earningsDate}
+                    className={cn(
+                      "flex items-center justify-between rounded-md px-3 py-2",
+                      e.daysUntil <= 3 ? "bg-amber-950/30 border border-amber-500/20" : "bg-zinc-900/40"
+                    )}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="font-medium text-zinc-50 w-12">{e.symbol}</span>
+                      <span className="text-xs text-zinc-400">
+                        {format(new Date(e.earningsDate), 'MMM d, yyyy')}
+                      </span>
+                      {isHeld && <Badge variant="warning" className="text-xs">held</Badge>}
+                      {f?.epsTrailing && (
+                        <span className="text-xs text-zinc-500">
+                          Last EPS: ${f.epsTrailing.toFixed(2)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {e.epsEstimate && (
+                        <span className="text-xs text-zinc-400 font-mono">est. ${e.epsEstimate.toFixed(2)}</span>
+                      )}
+                      <Badge variant={e.daysUntil <= 1 ? "destructive" : e.daysUntil <= 7 ? "warning" : "secondary"}>
+                        {e.daysUntil === 0 ? "Today" : e.daysUntil === 1 ? "Tomorrow" : `${e.daysUntil}d`}
+                      </Badge>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Recent Engine Decisions */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <FileText className="h-4 w-4 text-zinc-400" />
+            Recent AI Decisions
+          </CardTitle>
+          <CardDescription>Last 10 engine log entries</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {engineLogs.length === 0 ? (
+            <p className="text-sm text-zinc-500 text-center py-4">
+              No decisions yet. Enable auto-trading in Decision Engine.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {engineLogs.slice(0, 10).map(log => (
+                <div key={log.id} className={cn(
+                  "rounded px-3 py-2 text-xs space-y-1",
+                  log.status === 'EXECUTED' ? "bg-emerald-950/30 border border-emerald-500/20"
+                  : log.status === 'REJECTED' ? "bg-red-950/30 border border-red-500/20"
+                  : "bg-zinc-900/50"
+                )}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Badge variant={
+                        log.type === 'DECISION' ? 'success'
+                        : log.type === 'RISK_CHECK' ? 'warning'
+                        : log.type === 'HYPOTHESIS' ? 'default'
+                        : 'secondary'
+                      } className="text-[10px]">
+                        {log.type}
+                      </Badge>
+                      <span className="font-medium text-zinc-300">{log.asset}</span>
+                    </div>
+                    <span className="text-zinc-600">
+                      {formatDistanceToNow(new Date(log.timestamp), { addSuffix: true })}
+                    </span>
+                  </div>
+                  <p className="text-zinc-400 leading-relaxed">{log.content}</p>
+                  {log.action && <p className="text-zinc-500 italic">{log.action}</p>}
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
